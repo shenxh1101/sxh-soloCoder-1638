@@ -399,6 +399,7 @@ def show_rental_menu():
             "查看超期租赁",
             "查看租赁详情",
             "设备排期查询",
+            "客户档案查询",
         ])
 
         choice = get_input("请选择操作", "0")
@@ -415,6 +416,8 @@ def show_rental_menu():
             show_rental_detail()
         elif choice == "6":
             show_equipment_schedule_view()
+        elif choice == "7":
+            show_customer_profile()
         elif choice == "0":
             break
         else:
@@ -553,8 +556,8 @@ def show_rent_equipment():
 def show_return_equipment():
     clear_screen()
     print_header()
-    print("设备归还")
-    print("-" * 50)
+    print("设备归还结算")
+    print("-" * 60)
 
     active_rentals_list = get_active_rentals()
 
@@ -599,29 +602,60 @@ def show_return_equipment():
     return_date = get_date_input("\n请输入实际归还日期", date.today())
     end_hours = get_float_input("请输入归还时的工时数 (小时)", min_value=rental.start_hours)
 
-    from rental_manager import calculate_overdue
-    overdue_days, overdue_fine = calculate_overdue(rental, return_date)
+    from rental_manager import calculate_return_settlement
+    try:
+        settlement = calculate_return_settlement(rental.id, return_date, end_hours)
+    except ValueError as e:
+        print(f"\n结算失败: {e}")
+        input("\n按回车键继续...")
+        return
 
-    used_hours = end_hours - rental.start_hours
+    print("\n" + "=" * 60)
+    print("                      费用结算单")
+    print("=" * 60)
+    print(f"  租赁编号: {rental.id}")
+    print(f"  客户名称: {rental.customer_name}")
+    print(f"  设备: {rental.equipment_id} ({equipment.type} {equipment.model})")
+    print("-" * 60)
 
-    if rental.billing_method == "按小时":
-        base_cost = rental.hourly_rate * used_hours
+    if settlement["billing_method"] == "按天":
+        print(f"  计费方式: 按天计费")
+        print(f"  预计租期: {rental.rental_date} 至 {rental.expected_return_date}")
+        print(f"  预计天数: {settlement['expected_days']} 天")
+        print(f"  日租金: ¥{rental.daily_rate:.2f}/天")
+        print(f"  原租期费用: ¥{settlement['original_rental_cost']:.2f}")
+        print("-" * 60)
+        print(f"  实际归还日期: {return_date}")
+        print(f"  实际使用天数: {settlement['actual_days']} 天")
+        print(f"  实际使用工时: {settlement['used_hours']:.1f} 小时")
+        print("-" * 60)
+        print(f"  租金费用: ¥{settlement['actual_rental_cost']:.2f}")
     else:
-        base_cost = rental.total_cost - rental.overdue_fine
+        print(f"  计费方式: 按小时计费")
+        print(f"  起租工时: {settlement['start_hours']:.1f} 小时")
+        print(f"  归还工时: {settlement['end_hours']:.1f} 小时")
+        print(f"  实际使用工时: {settlement['used_hours']:.1f} 小时")
+        print(f"  小时费率: ¥{rental.hourly_rate:.2f}/小时")
+        print("-" * 60)
+        print(f"  预计租期: {rental.rental_date} 至 {rental.expected_return_date}")
+        print(f"  实际归还日期: {return_date}")
+        print(f"  实际使用天数: {settlement['actual_days']} 天")
+        print("-" * 60)
+        print(f"  工时费用: ¥{settlement['actual_rental_cost']:.2f}")
 
-    total_cost = base_cost + overdue_fine
+    if settlement["overdue_days"] > 0:
+        print("-" * 60)
+        print(f"  超期天数: {settlement['overdue_days']} 天")
+        print(f"  超期罚款: ¥{settlement['overdue_fine']:.2f}")
+    else:
+        print("-" * 60)
+        print(f"  超期情况: 按时归还 (无超期罚款)")
 
-    print("\n" + "=" * 50)
-    print("费用结算:")
-    print(f"  使用工时: {used_hours:.1f} 小时")
-    print(f"  基础租金: ¥{base_cost:.2f}")
-    if overdue_days > 0:
-        print(f"  超期天数: {overdue_days} 天")
-        print(f"  超期罚款: ¥{overdue_fine:.2f}")
-    print(f"  总计费用: ¥{total_cost:.2f}")
-    print("=" * 50)
+    print("=" * 60)
+    print(f"  最终应收:  ¥{settlement['total_receivable']:.2f}")
+    print("=" * 60)
 
-    confirm = get_input("\n确认归还并结算？(y/n)", "y")
+    confirm = get_input("\n确认结算并完成归还？(y/n)", "y")
     if confirm.lower() != "y":
         print("已取消归还。")
         input("\n按回车键继续...")
@@ -629,7 +663,7 @@ def show_return_equipment():
 
     try:
         result = return_equipment(rental.id, return_date, end_hours)
-        print(f"\n归还成功！总费用: ¥{result.total_cost:.2f}")
+        print(f"\n✓ 归还成功！最终应收: ¥{result.total_cost:.2f}")
     except ValueError as e:
         print(f"\n归还失败: {e}")
 
@@ -734,11 +768,12 @@ def show_rental_detail():
 def show_equipment_schedule_view():
     from datetime import timedelta
     from storage import get_equipment_by_id
+    from rental_manager import get_equipment_schedule_multi
 
     clear_screen()
     print_header()
-    print("设备排期查询")
-    print("-" * 70)
+    print("设备排期总览")
+    print("-" * 80)
 
     all_equipment = list_all_equipment()
 
@@ -747,16 +782,7 @@ def show_equipment_schedule_view():
         input("\n按回车键继续...")
         return
 
-    print("设备列表:")
-    for i, eq in enumerate(all_equipment, 1):
-        status_tag = "【在租】" if eq.status == "在租" else ""
-        print(f"  {i}. {eq.id} - {eq.type} {eq.model} {status_tag}")
-
-    print()
-    idx = get_int_input("请选择要查询的设备 (序号)", min_value=1, max_value=len(all_equipment))
-    equipment = all_equipment[idx - 1]
-
-    print(f"\n查询时间段:")
+    print("查询时间段:")
     start_date = get_date_input("开始日期", date.today())
 
     default_end = start_date + timedelta(days=30)
@@ -766,31 +792,154 @@ def show_equipment_schedule_view():
         print("开始日期不能晚于结束日期，已自动调换。")
         start_date, end_date = end_date, start_date
 
-    schedule = get_equipment_schedule(equipment.id, start_date, end_date)
+    print("\n设备类型筛选:")
+    type_list = list(EQUIPMENT_TYPES)
+    for i, t in enumerate(type_list, 1):
+        print(f"  {i}. {t}")
+    print(f"  {len(type_list) + 1}. 全部类型")
 
-    print(f"\n设备排期: {equipment.id} ({equipment.type} {equipment.model})")
-    print(f"查询区间: {start_date} ~ {end_date} (共{(end_date - start_date).days + 1}天)")
+    type_idx = get_int_input("请选择设备类型", min_value=1, max_value=len(type_list) + 1,
+                            default=str(len(type_list) + 1))
+    eq_type = None
+    if type_idx <= len(type_list):
+        eq_type = type_list[type_idx - 1]
+
+    schedule_list = get_equipment_schedule_multi(start_date, end_date, eq_type)
+
+    total_days = (end_date - start_date).days + 1
+    type_str = f" ({eq_type})" if eq_type else " (全部)"
+
+    print(f"\n{'=' * 80}")
+    print(f"设备排期总览{type_str}  |  {start_date} ~ {end_date} (共{total_days}天)")
+    print(f"{'=' * 80}")
+
+    idle_equipment = [s for s in schedule_list if s["is_idle"]]
+    busy_equipment = [s for s in schedule_list if not s["is_idle"]]
+
+    if idle_equipment:
+        print(f"\n【空闲设备】({len(idle_equipment)} 台 - 全时段可用)")
+        print("-" * 80)
+        for s in idle_equipment:
+            eq = s["equipment"]
+            print(f"  ✓ {eq.id} - {eq.type} {eq.model}  (当前: {eq.status})")
+
+    if busy_equipment:
+        print(f"\n【有预约设备】({len(busy_equipment)} 台)")
+        print("-" * 80)
+        for s in busy_equipment:
+            eq = s["equipment"]
+            print(f"\n  {eq.id} - {eq.type} {eq.model}")
+            print(f"    利用率: {s['utilization']}%  |  已租: {s['rented_days']}天  |  空闲: {s['idle_days']}天")
+            if s["schedule"]:
+                print(f"    租赁记录:")
+                for r in s["schedule"]:
+                    r_end = r.actual_return_date or r.expected_return_date
+                    status = "进行中" if r.status == "进行中" else "已完成"
+                    print(f"      • {r.rental_date} ~ {r_end}  {r.customer_name}  [{status}]")
+
+    print(f"\n{'=' * 80}")
+    print(f"合计: {len(schedule_list)} 台设备  |  空闲: {len(idle_equipment)} 台  |  已预约: {len(busy_equipment)} 台")
+    print(f"{'=' * 80}")
+
+    if idle_equipment:
+        print("\n提示: 空闲设备可直接安排新订单，时间段不会冲突。")
+
+    input("\n按回车键继续...")
+
+
+def show_customer_profile():
+    from rental_manager import search_customer, get_customer_profile
+
+    clear_screen()
+    print_header()
+    print("客户档案查询")
     print("-" * 70)
 
-    if not schedule:
-        print("  该时间段内无租赁记录，设备全天空闲。")
-    else:
-        total_rented_days = 0
-        print(f"{'起始日期':<12} {'结束日期':<12} {'客户':<14} {'状态':<10} {'天数':<6}")
-        print("-" * 70)
-        for r in schedule:
-            r_start = max(r.rental_date, start_date)
-            r_end = r.actual_return_date or r.expected_return_date
-            r_end = min(r_end, end_date)
-            days = (r_end - r_start).days + 1
-            total_rented_days += days
-            status = "进行中" if r.status == "进行中" else "已完成"
-            print(f"{r.rental_date:<12} {r_end:<12} {r.customer_name:<14} {status:<10} {days:<6}")
+    keyword = get_input("请输入客户姓名或电话 (部分匹配)", "")
 
-        total_days = (end_date - start_date).days + 1
-        utilization = (total_rented_days / total_days * 100) if total_days > 0 else 0
+    if not keyword.strip():
+        print("未输入查询关键字。")
+        input("\n按回车键继续...")
+        return
+
+    results = search_customer(keyword)
+
+    if not results:
+        print(f"\n未找到与 \"{keyword}\" 相关的客户记录。")
+        input("\n按回车键继续...")
+        return
+
+    print(f"\n找到 {len(results)} 位匹配客户:")
+    print("-" * 70)
+    for i, c in enumerate(results, 1):
+        status_str = ""
+        if c["overdue_count"] > 0:
+            status_str = f"  ⚠️ 超期{c['overdue_count']}次"
+        print(f"  {i}. {c['name']} ({c['phone']})")
+        print(f"     共{c['total_rentals']}单  累计消费:¥{c['total_spent']:.2f}  "
+              f"进行中:{c['active_count']}单{status_str}")
+
+    print()
+    idx = get_int_input("请选择查看详情 (序号, 输入 0 返回)", min_value=0, max_value=len(results))
+
+    if idx == 0:
+        return
+
+    customer = results[idx - 1]
+    profile = get_customer_profile(customer["name"], customer["phone"])
+
+    if not profile:
+        print("客户详情获取失败。")
+        input("\n按回车键继续...")
+        return
+
+    clear_screen()
+    print_header()
+    print(f"客户档案 - {profile['name']}")
+    print("=" * 70)
+    print(f"  客户姓名: {profile['name']}")
+    print(f"  联系电话: {profile['phone']}")
+    print(f"  首次合作: {profile['first_rental_date']}")
+    if profile['last_rental_date']:
+        print(f"  最近租赁: {profile['last_rental_date']}")
+    print("-" * 70)
+    print(f"  累计租赁: {profile['total_rentals']} 单")
+    print(f"  已完成: {profile['completed_count']} 单")
+    print(f"  进行中: {profile['active_count']} 单")
+    print(f"  超期次数: {profile['overdue_count']} 次")
+    print(f"  累计消费: ¥{profile['total_spent']:.2f}")
+    print(f"  累计工时: {profile['total_hours']:.1f} 小时")
+    print("=" * 70)
+
+    if profile["active_rentals"]:
+        print(f"\n【当前未归还设备】({len(profile['active_rentals'])} 台)")
         print("-" * 70)
-        print(f"租赁天数: {total_rented_days} 天 / {total_days} 天 (利用率: {utilization:.1f}%)")
+        for r in profile["active_rentals"]:
+            from storage import get_equipment_by_id
+            eq = get_equipment_by_id(r.equipment_id)
+            eq_info = f"{r.equipment_id} ({eq.type} {eq.model})" if eq else r.equipment_id
+            overdue_str = " ⚠️超期" if r.is_overdue else ""
+            print(f"  • {eq_info}")
+            print(f"    起租: {r.rental_date}  预计归还: {r.expected_return_date}{overdue_str}")
+            print(f"    已收金额: ¥{r.total_cost:.2f}")
+
+    print(f"\n【历史租赁记录】(共 {profile['total_rentals']} 单)")
+    print("-" * 70)
+    print(f"{'日期':<12} {'设备':<12} {'状态':<8} {'金额':>10} {'备注':<15}")
+    print("-" * 70)
+    for r in profile["rentals"][:15]:
+        r_end = r.actual_return_date or r.expected_return_date
+        date_str = f"{r.rental_date}"
+        status = "已完成" if r.status == "已完成" else "进行中"
+        fine_str = ""
+        if r.overdue_fine > 0:
+            fine_str = f"含超期¥{r.overdue_fine:.0f}"
+        print(f"{date_str:<12} {r.equipment_id:<12} {status:<8} ¥{r.total_cost:>8.2f} {fine_str:<15}")
+
+    if len(profile["rentals"]) > 15:
+        print(f"  ... 共 {len(profile['rentals'])} 条，仅显示前 15 条")
+
+    print("=" * 70)
 
     input("\n按回车键继续...")
 
@@ -1184,6 +1333,9 @@ def show_monthly_report():
 
 
 def show_export_monthly_report():
+    import os
+    from reports import get_unique_filename
+
     clear_screen()
     print_header()
     print("导出月度报表")
@@ -1197,10 +1349,34 @@ def show_export_monthly_report():
     if not filename.endswith('.csv'):
         filename += '.csv'
 
+    filepath = filename
+
+    if os.path.exists(filepath):
+        print(f"\n⚠️  文件名 \"{filepath}\" 已存在！")
+        print("  1. 自动追加序号 (生成新文件，旧文件保留)")
+        print("  2. 重新输入文件名")
+        choice = get_input("请选择处理方式", "1")
+
+        if choice == "2":
+            while True:
+                filename = get_input("请输入新的文件名", f"月度报表_{year}_{month:02d}_new.csv")
+                if not filename.endswith('.csv'):
+                    filename += '.csv'
+                if not os.path.exists(filename):
+                    filepath = filename
+                    break
+                print(f"  \"{filename}\" 也已存在，请重新输入。")
+        else:
+            filepath = get_unique_filename(filepath)
+            print(f"  将使用新文件名: {filepath}")
+
     try:
-        filepath = export_monthly_report_to_csv(year, month, filename)
-        print(f"\n报表导出成功！文件: {filepath}")
-        print("该 CSV 包含6个工作表：收入总览、按设备类型、按计费方式、按客户、按设备、租赁明细")
+        if os.path.exists(filepath):
+            actual_path = export_monthly_report_to_csv(year, month, filepath, auto_increment=True)
+        else:
+            actual_path = export_monthly_report_to_csv(year, month, filepath, auto_increment=False)
+        print(f"\n✓ 报表导出成功！文件: {actual_path}")
+        print("  该 CSV 包含6个板块：收入总览、按设备类型、按计费方式、按客户、按设备、租赁明细")
     except Exception as e:
         print(f"\n导出失败: {e}")
 

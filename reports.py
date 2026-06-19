@@ -1,3 +1,4 @@
+import os
 from datetime import date, timedelta
 from typing import List, Dict
 from collections import defaultdict
@@ -5,6 +6,20 @@ from collections import defaultdict
 from models import Equipment, RentalRecord, EQUIPMENT_TYPES
 from storage import load_equipment, load_rentals, load_maintenance
 from rental_manager import get_rentals_on_date
+
+
+def get_unique_filename(filepath: str) -> str:
+    if not os.path.exists(filepath):
+        return filepath
+
+    base, ext = os.path.splitext(filepath)
+    counter = 2
+    while True:
+        new_path = f"{base}_{counter}{ext}"
+        if not os.path.exists(new_path):
+            return new_path
+        counter += 1
+
 
 
 def get_equipment_status_by_type() -> Dict[str, Dict[str, int]]:
@@ -247,7 +262,15 @@ def get_monthly_revenue_report(year: int, month: int) -> dict:
     }
 
 
-def export_monthly_report_to_csv(year: int, month: int, filepath: str) -> str:
+def export_monthly_report_to_csv(
+    year: int,
+    month: int,
+    filepath: str,
+    auto_increment: bool = True,
+) -> str:
+    if auto_increment:
+        filepath = get_unique_filename(filepath)
+
     report = get_monthly_revenue_report(year, month)
 
     lines = []
