@@ -164,7 +164,7 @@ def save_maintenance(records: List[MaintenanceRecord]):
 
 
 def generate_id(prefix: str) -> str:
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
     return f"{prefix}-{timestamp}"
 
 

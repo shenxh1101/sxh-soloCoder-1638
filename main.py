@@ -14,6 +14,8 @@ from rental_manager import (
     get_active_rentals,
     get_overdue_rentals,
     get_rentals_by_equipment,
+    get_equipment_schedule,
+    check_rental_conflict,
 )
 from maintenance_manager import (
     get_maintenance_checklist,
@@ -90,7 +92,7 @@ def get_float_input(prompt, default=None, min_value=None):
             print("请输入有效的数字。")
 
 
-def get_int_input(prompt, default=None, min_value=None):
+def get_int_input(prompt, default=None, min_value=None, max_value=None):
     while True:
         user_input = get_input(prompt, default)
         try:
@@ -98,9 +100,20 @@ def get_int_input(prompt, default=None, min_value=None):
             if min_value is not None and value < min_value:
                 print(f"数值不能小于 {min_value}，请重新输入。")
                 continue
+            if max_value is not None and value > max_value:
+                print(f"数值不能大于 {max_value}，请重新输入。")
+                continue
             return value
         except ValueError:
             print("请输入有效的整数。")
+
+
+def get_year_month_input() -> tuple:
+    while True:
+        today = date.today()
+        year = get_int_input("请输入年份", str(today.year), min_value=2000, max_value=2100)
+        month = get_int_input("请输入月份 (1-12)", str(today.month), min_value=1, max_value=12)
+        return year, month
 
 
 def show_maintenance_alert():
@@ -385,6 +398,7 @@ def show_rental_menu():
             "查看进行中租赁",
             "查看超期租赁",
             "查看租赁详情",
+            "设备排期查询",
         ])
 
         choice = get_input("请选择操作", "0")
@@ -399,6 +413,8 @@ def show_rental_menu():
             show_overdue_rentals()
         elif choice == "5":
             show_rental_detail()
+        elif choice == "6":
+            show_equipment_schedule_view()
         elif choice == "0":
             break
         else:
@@ -406,37 +422,84 @@ def show_rental_menu():
 
 
 def show_rent_equipment():
+    from storage import get_equipment_by_id
+    from rental_manager import calculate_rental_cost
+    from datetime import timedelta
+
     clear_screen()
     print_header()
     print("设备出租")
-    print("-" * 50)
+    print("-" * 60)
 
-    idle_equipment = list_all_equipment(status="空闲")
+    all_equipment = list_all_equipment()
 
-    if not idle_equipment:
-        print("当前没有空闲设备。")
+    if not all_equipment:
+        print("当前没有设备。")
         input("\n按回车键继续...")
         return
 
-    print("空闲设备列表:")
-    for i, eq in enumerate(idle_equipment, 1):
+    print("设备列表:")
+    for i, eq in enumerate(all_equipment, 1):
         daily_rate = eq.hourly_rate * 8
-        print(f"  {i}. {eq.id} - {eq.type} {eq.model} - ¥{eq.hourly_rate:.0f}/小时 (¥{daily_rate:.0f}/天)")
+        status_tag = "【在租】" if eq.status == "在租" else ""
+        print(f"  {i}. {eq.id} - {eq.type} {eq.model} {status_tag}")
+        print(f"     ¥{eq.hourly_rate:.0f}/小时 (¥{daily_rate:.0f}/天) - 累计{ eq.total_hours:.0f}小时")
 
     print()
-    idx = get_int_input("请选择要出租的设备 (序号)", min_value=1)
-    if idx < 1 or idx > len(idle_equipment):
-        print("无效的序号。")
+    while True:
+        idx = get_int_input("请选择要出租的设备 (序号)", min_value=1, max_value=len(all_equipment))
+        equipment = all_equipment[idx - 1]
+
+        print(f"\n已选设备: {equipment.id} ({equipment.type} {equipment.model})")
+        print(f"当前状态: {equipment.status}")
+
+        schedule_end = date.today() + timedelta(days=60)
+        schedule = get_equipment_schedule(equipment.id, date.today(), schedule_end)
+
+        print(f"\n【排期预览】未来60天:")
+        if not schedule:
+            print("  暂无排期，设备全天空闲")
+        else:
+            for r in schedule:
+                r_end = r.actual_return_date or r.expected_return_date
+                status = "进行中" if r.status == "进行中" else "已完成"
+                print(f"  {r.rental_date} ~ {r_end} - {r.customer_name} ({status})")
+
+        confirm_eq = get_input("\n确认选择该设备？(y/n) 或输入 r 重新选择", "y")
+        if confirm_eq.lower() == "r":
+            continue
+        if confirm_eq.lower() == "y":
+            break
+        print("已取消选择。")
         input("\n按回车键继续...")
         return
-
-    equipment = idle_equipment[idx - 1]
 
     customer_name = get_input("请输入客户名称")
     customer_phone = get_input("请输入客户联系方式")
 
-    rental_date = get_date_input("请输入起租日期", date.today())
-    expected_return_date = get_date_input("请输入预计归还日期")
+    while True:
+        print()
+        rental_date = get_date_input("请输入起租日期", date.today())
+        expected_return_date = get_date_input("请输入预计归还日期")
+
+        if rental_date > expected_return_date:
+            print("起租日期不能晚于预计归还日期，请重新输入。")
+            continue
+
+        conflicts = check_rental_conflict(equipment.id, rental_date, expected_return_date)
+        if conflicts:
+            print("\n⚠️  排期冲突！该时间段内已有以下租赁：")
+            for c in conflicts:
+                c_end = c.actual_return_date or c.expected_return_date
+                print(f"  - {c.rental_date} ~ {c_end} ({c.customer_name})")
+            retry = get_input("\n是否重新选择日期？(y/n)", "y")
+            if retry.lower() == "y":
+                continue
+            else:
+                print("已取消出租。")
+                input("\n按回车键继续...")
+                return
+        break
 
     print("\n计费方式:")
     print("  1. 按天计费")
@@ -446,22 +509,22 @@ def show_rent_equipment():
 
     notes = get_input("备注信息 (可选)", "")
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("租赁信息确认:")
     print(f"  设备: {equipment.id} ({equipment.type} {equipment.model})")
     print(f"  客户: {customer_name} ({customer_phone})")
     print(f"  起租日期: {rental_date}")
     print(f"  预计归还: {expected_return_date}")
+    print(f"  租期: {(expected_return_date - rental_date).days + 1} 天")
     print(f"  计费方式: {billing_method}")
 
-    from rental_manager import calculate_rental_cost
     total_cost, daily_rate, hourly_rate = calculate_rental_cost(
         equipment, rental_date, expected_return_date, billing_method
     )
+    print(f"  日租价格: ¥{daily_rate:.2f}/天")
+    print(f"  时租价格: ¥{hourly_rate:.2f}/小时")
     print(f"  预计租金: ¥{total_cost:.2f}")
-    print(f"  (日租: ¥{daily_rate:.2f}/天")
-    print(f"  (时租: ¥{hourly_rate:.2f}/小时")
-    print("=" * 50)
+    print("=" * 60)
 
     confirm = get_input("\n确认出租？(y/n)", "y")
     if confirm.lower() != "y":
@@ -478,6 +541,7 @@ def show_rent_equipment():
             expected_return_date,
             billing_method,
             notes,
+            check_conflict=True,
         )
         print(f"\n出租成功！租赁编号: {rental.id}")
     except ValueError as e:
@@ -663,6 +727,70 @@ def show_rental_detail():
     print(f"状态: {rental.status}")
     if rental.notes:
         print(f"备注: {rental.notes}")
+
+    input("\n按回车键继续...")
+
+
+def show_equipment_schedule_view():
+    from datetime import timedelta
+    from storage import get_equipment_by_id
+
+    clear_screen()
+    print_header()
+    print("设备排期查询")
+    print("-" * 70)
+
+    all_equipment = list_all_equipment()
+
+    if not all_equipment:
+        print("当前没有设备。")
+        input("\n按回车键继续...")
+        return
+
+    print("设备列表:")
+    for i, eq in enumerate(all_equipment, 1):
+        status_tag = "【在租】" if eq.status == "在租" else ""
+        print(f"  {i}. {eq.id} - {eq.type} {eq.model} {status_tag}")
+
+    print()
+    idx = get_int_input("请选择要查询的设备 (序号)", min_value=1, max_value=len(all_equipment))
+    equipment = all_equipment[idx - 1]
+
+    print(f"\n查询时间段:")
+    start_date = get_date_input("开始日期", date.today())
+
+    default_end = start_date + timedelta(days=30)
+    end_date = get_date_input("结束日期", default_end.strftime("%Y-%m-%d"))
+
+    if start_date > end_date:
+        print("开始日期不能晚于结束日期，已自动调换。")
+        start_date, end_date = end_date, start_date
+
+    schedule = get_equipment_schedule(equipment.id, start_date, end_date)
+
+    print(f"\n设备排期: {equipment.id} ({equipment.type} {equipment.model})")
+    print(f"查询区间: {start_date} ~ {end_date} (共{(end_date - start_date).days + 1}天)")
+    print("-" * 70)
+
+    if not schedule:
+        print("  该时间段内无租赁记录，设备全天空闲。")
+    else:
+        total_rented_days = 0
+        print(f"{'起始日期':<12} {'结束日期':<12} {'客户':<14} {'状态':<10} {'天数':<6}")
+        print("-" * 70)
+        for r in schedule:
+            r_start = max(r.rental_date, start_date)
+            r_end = r.actual_return_date or r.expected_return_date
+            r_end = min(r_end, end_date)
+            days = (r_end - r_start).days + 1
+            total_rented_days += days
+            status = "进行中" if r.status == "进行中" else "已完成"
+            print(f"{r.rental_date:<12} {r_end:<12} {r.customer_name:<14} {status:<10} {days:<6}")
+
+        total_days = (end_date - start_date).days + 1
+        utilization = (total_rented_days / total_days * 100) if total_days > 0 else 0
+        print("-" * 70)
+        print(f"租赁天数: {total_rented_days} 天 / {total_days} 天 (利用率: {utilization:.1f}%)")
 
     input("\n按回车键继续...")
 
@@ -924,29 +1052,64 @@ def show_equipment_status_by_type():
 def show_daily_report():
     clear_screen()
     print_header()
-    print("每日设备状态报表")
-    print("-" * 60)
+    print("每日设备状态报表（支持历史回看）")
+    print("-" * 70)
 
     report_date = get_date_input("请输入报表日期", date.today())
 
     report = get_daily_status_report(report_date)
 
-    print(f"\n报表日期: {report['report_date']}")
+    print(f"\n报表日期: {report['report_date']}"
+          f"{'（今天）' if report_date == date.today() else ''}")
     print()
     print(f"设备总数: {report['total_equipment']} 台")
     print(f"在租设备: {report['rented_count']} 台")
     print(f"空闲设备: {report['idle_count']} 台")
     print()
-    print(f"今日新租: {report['new_rentals_count']} 单")
-    print(f"今日归还: {report['returns_count']} 单")
+    print(f"当日新租: {report['new_rentals_count']} 单")
+    print(f"当日归还: {report['returns_count']} 单")
     print(f"超期租赁: {report['overdue_count']} 单")
-    print(f"今日收入: ¥{report['total_revenue_today']:.2f}")
+    print()
+    print(f"当日租金收入: ¥{report['new_revenue']:.2f}")
+    print(f"当日超期罚款: ¥{report['fine_revenue']:.2f}")
+    print(f"当日总收入: ¥{report['total_revenue']:.2f}")
+
+    rented_by_type = report.get('rented_by_type', {})
+    if rented_by_type:
+        print("\n【在租设备按类型分布】")
+        for eq_type in EQUIPMENT_TYPES:
+            count = rented_by_type.get(eq_type, 0)
+            if count > 0:
+                print(f"  {eq_type}: {count} 台")
+
+    if report['rented_details']:
+        print(f"\n【当日在租设备明细】（共{len(report['rented_details'])}条记录）")
+        print("-" * 70)
+        seen = set()
+        for r in report['rented_details']:
+            if r.equipment_id not in seen:
+                seen.add(r.equipment_id)
+                overdue_str = ""
+                if report_date > r.expected_return_date and r.status == "进行中":
+                    overdue_days = (report_date - r.expected_return_date).days
+                    overdue_str = f"【超期{overdue_days}天】"
+                print(f"  {r.equipment_id} - {r.customer_name} {overdue_str}")
+
+    if report['new_rentals']:
+        print(f"\n【当日新租】（共{len(report['new_rentals'])}单）")
+        for r in report['new_rentals']:
+            print(f"  {r.id} - {r.equipment_id} - {r.customer_name}")
+
+    if report['returns']:
+        print(f"\n【当日归还】（共{len(report['returns'])}单）")
+        for r in report['returns']:
+            print(f"  {r.id} - {r.equipment_id} - {r.customer_name} - ¥{r.total_cost:.2f}")
 
     if report['overdue_rentals']:
-        print("\n超期租赁明细:")
+        print(f"\n【超期租赁明细】（共{len(report['overdue_rentals'])}单）")
         for r in report['overdue_rentals']:
-            overdue_days = (date.today() - r.expected_return_date).days
-            print(f"  - {r.id} | {r.equipment_id} | {r.customer_name} | 超期{overdue_days}天")
+            overdue_days = (report_date - r.expected_return_date).days
+            print(f"  {r.id} | {r.equipment_id} | {r.customer_name} | 超期{overdue_days}天")
 
     input("\n按回车键继续...")
 
@@ -955,32 +1118,67 @@ def show_monthly_report():
     clear_screen()
     print_header()
     print("月度租赁收入报表")
-    print("-" * 60)
+    print("-" * 70)
 
-    today = date.today()
-    year = get_int_input("请输入年份", today.year)
-    month = get_int_input("请输入月份", today.month)
+    year, month = get_year_month_input()
 
     report = get_monthly_revenue_report(year, month)
 
     print(f"\n统计周期: {report['month_start']} 至 {report['month_end']}")
     print()
-    print(f"完成租赁: {report['total_rentals']} 单")
-    print(f"进行中: {report['active_rentals']} 单")
-    print(f"租金收入: ¥{report['base_revenue']:.2f}")
-    print(f"超期罚款: ¥{report['total_fines']:.2f}")
-    print(f"总收入: ¥{report['total_revenue']:.2f}")
+    print("【收入总览】")
+    print(f"  完成租赁: {report['total_rentals']} 单")
+    print(f"  进行中: {report['active_rentals']} 单")
+    print(f"  累计租赁天数: {report['total_rental_days']} 天")
+    print(f"  累计租赁工时: {report['total_rental_hours']} 小时")
+    print()
+    print(f"  租金收入: ¥{report['base_revenue']:.2f}  ({100 - report['fine_ratio']:.2f}%)")
+    print(f"  超期罚款: ¥{report['total_fines']:.2f}  ({report['fine_ratio']:.2f}%)")
+    print(f"  总收入:   ¥{report['total_revenue']:.2f}  (100.00%)")
 
-    print("\n按客户汇总 (前5名):")
-    print("-" * 60)
-    for i, cust in enumerate(report['customer_summary'][:5], 1):
-        print(f"  {i}. {cust['name']} ({cust['phone']} - "
-              f"¥{cust['total_amount']:.2f} ({cust['rental_count']}单")
+    if report['type_summary']:
+        print(f"\n【按设备类型汇总】")
+        print("-" * 70)
+        print(f"{'设备类型':<10} {'单数':<6} {'租金收入':<12} {'超期罚款':<12} {'总收入':<12} {'占比':<8}")
+        print("-" * 70)
+        for item in report['type_summary']:
+            ratio = (item['revenue'] / report['total_revenue'] * 100) if report['total_revenue'] > 0 else 0
+            base_rev = item['revenue'] - item['fines']
+            print(f"{item['type']:<10} {item['rental_count']:<6} "
+                  f"¥{base_rev:<11.2f} ¥{item['fines']:<11.2f} "
+                  f"¥{item['revenue']:<11.2f} {ratio:<7.2f}%")
 
-    print("\n按设备汇总 (前5名):")
-    print("-" * 60)
-    for i, eq in enumerate(report['equipment_revenue'][:5], 1):
-        print(f"  {i}. {eq['id']} ({eq['type']} {eq['model']}) - ¥{eq['revenue']:.2f}")
+    if report['billing_summary']:
+        print(f"\n【按计费方式汇总】")
+        print("-" * 70)
+        print(f"{'计费方式':<10} {'单数':<6} {'租金收入':<12} {'超期罚款':<12} {'总收入':<12} {'占比':<8}")
+        print("-" * 70)
+        for item in report['billing_summary']:
+            ratio = (item['revenue'] / report['total_revenue'] * 100) if report['total_revenue'] > 0 else 0
+            base_rev = item['revenue'] - item['fines']
+            print(f"{item['method']:<10} {item['rental_count']:<6} "
+                  f"¥{base_rev:<11.2f} ¥{item['fines']:<11.2f} "
+                  f"¥{item['revenue']:<11.2f} {ratio:<7.2f}%")
+
+    if report['customer_summary']:
+        print(f"\n【按客户汇总 (前10名)】")
+        print("-" * 70)
+        print(f"{'排名':<4} {'客户名称':<14} {'单数':<5} {'总金额':<12} {'占比':<8}")
+        print("-" * 70)
+        for i, cust in enumerate(report['customer_summary'][:10], 1):
+            ratio = (cust['total_amount'] / report['total_revenue'] * 100) if report['total_revenue'] > 0 else 0
+            print(f"{i:<4} {cust['name']:<14} {cust['rental_count']:<5} "
+                  f"¥{cust['total_amount']:<11.2f} {ratio:<7.2f}%")
+
+    if report['equipment_revenue']:
+        print(f"\n【按设备汇总 (前10名)】")
+        print("-" * 70)
+        print(f"{'排名':<4} {'设备编号':<10} {'型号':<14} {'单数':<5} {'收入':<12} {'占比':<8}")
+        print("-" * 70)
+        for i, eq in enumerate(report['equipment_revenue'][:10], 1):
+            ratio = (eq['revenue'] / report['total_revenue'] * 100) if report['total_revenue'] > 0 else 0
+            print(f"{i:<4} {eq['id']:<10} {eq['model']:<14} {eq['rental_count']:<5} "
+                  f"¥{eq['revenue']:<11.2f} {ratio:<7.2f}%")
 
     input("\n按回车键继续...")
 
@@ -989,11 +1187,9 @@ def show_export_monthly_report():
     clear_screen()
     print_header()
     print("导出月度报表")
-    print("-" * 50)
+    print("-" * 60)
 
-    today = date.today()
-    year = get_int_input("请输入年份", today.year)
-    month = get_int_input("请输入月份", today.month)
+    year, month = get_year_month_input()
 
     default_filename = f"月度报表_{year}_{month:02d}.csv"
     filename = get_input("请输入文件名", default_filename)
@@ -1004,6 +1200,7 @@ def show_export_monthly_report():
     try:
         filepath = export_monthly_report_to_csv(year, month, filename)
         print(f"\n报表导出成功！文件: {filepath}")
+        print("该 CSV 包含6个工作表：收入总览、按设备类型、按计费方式、按客户、按设备、租赁明细")
     except Exception as e:
         print(f"\n导出失败: {e}")
 
@@ -1042,24 +1239,28 @@ def show_utilization_report():
 
 
 def init_sample_data():
-    from storage import load_equipment, save_equipment
-    from models import Equipment
+    from storage import load_equipment
+    from storage import reset_equipment_counter
 
     equipment_list = load_equipment()
     if equipment_list:
         return
 
-    sample_equipment = [
-        Equipment(id="W001", type="挖掘机", model="卡特320", hourly_rate=200, total_hours=1250.5, last_maintenance_hours=1000),
-        Equipment(id="W002", type="挖掘机", model="小松PC200", hourly_rate=180, total_hours=850.0, last_maintenance_hours=800),
-        Equipment(id="Z001", type="装载机", model="柳工856", hourly_rate=150, total_hours=2100.0, last_maintenance_hours=2000),
-        Equipment(id="Z002", type="装载机", model="徐工LW500", hourly_rate=140, total_hours=350.0, last_maintenance_hours=0),
-        Equipment(id="Q001", type="起重机", model="三一25吨", hourly_rate=300, total_hours=680.0, last_maintenance_hours=600),
-        Equipment(id="Y001", type="压路机", model="徐工XS263", hourly_rate=120, total_hours=420.0, last_maintenance_hours=350),
-        Equipment(id="T001", type="推土机", model="山推SD22", hourly_rate=250, total_hours=1580.0, last_maintenance_hours=1500),
+    for eq_type in EQUIPMENT_TYPES:
+        reset_equipment_counter(eq_type)
+
+    samples = [
+        ("挖掘机", "卡特320", 200, 1250.5),
+        ("挖掘机", "小松PC200", 180, 850.0),
+        ("装载机", "柳工856", 150, 2100.0),
+        ("装载机", "徐工LW500", 140, 350.0),
+        ("起重机", "三一25吨", 300, 680.0),
+        ("压路机", "徐工XS263", 120, 420.0),
+        ("推土机", "山推SD22", 250, 1580.0),
     ]
 
-    save_equipment(sample_equipment)
+    for eq_type, model, rate, hours in samples:
+        add_equipment(eq_type, model, rate, total_hours=hours)
 
 
 def main():

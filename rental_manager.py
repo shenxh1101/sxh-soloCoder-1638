@@ -60,15 +60,32 @@ def rent_equipment(
     expected_return_date: date,
     billing_method: str = "按天",
     notes: str = "",
+    check_conflict: bool = True,
 ) -> Optional[RentalRecord]:
     equipment = get_equipment_by_id(equipment_id)
     if not equipment:
         raise ValueError(f"设备 {equipment_id} 不存在")
-    if equipment.status != "空闲":
-        raise ValueError(f"设备 {equipment_id} 当前状态为 {equipment.status}，无法出租")
 
     if rental_date > expected_return_date:
         raise ValueError("起租日期不能晚于预计归还日期")
+
+    if check_conflict:
+        conflicts = check_rental_conflict(equipment_id, rental_date, expected_return_date)
+        if conflicts:
+            conflict_details = []
+            for c in conflicts:
+                c_end = c.actual_return_date or c.expected_return_date
+                conflict_details.append(
+                    f"{c.id} ({c.customer_name}): {c.rental_date} ~ {c_end}"
+                )
+            raise ValueError(
+                f"排期冲突！该设备在所选时间段内已有租赁：\n" + "\n".join(conflict_details)
+            )
+
+    if rental_date <= date.today() <= expected_return_date:
+        if equipment.status != "空闲":
+            raise ValueError(f"设备 {equipment_id} 当前状态为 {equipment.status}，无法出租")
+        equipment.status = "在租"
 
     total_cost, daily_rate, hourly_rate = calculate_rental_cost(
         equipment, rental_date, expected_return_date, billing_method
@@ -91,7 +108,6 @@ def rent_equipment(
         notes=notes,
     )
 
-    equipment.status = "在租"
     update_equipment(equipment)
 
     rentals = load_rentals()
@@ -187,8 +203,8 @@ def add_equipment(
         raise ValueError(f"设备类型必须是: {', '.join(EQUIPMENT_TYPES)}")
 
     equipment_list = load_equipment()
-    type_count = sum(1 for eq in equipment_list if eq.type == eq_type)
-    eq_id = f"{eq_type[0]}{type_count + 1:03d}"
+    next_num = get_next_equipment_number(eq_type)
+    eq_id = f"{eq_type[0]}{next_num:03d}"
 
     equipment = Equipment(
         id=eq_id,
@@ -225,3 +241,108 @@ def list_all_equipment(status: Optional[str] = None) -> List[Equipment]:
     if status:
         return [eq for eq in equipment_list if eq.status == status]
     return equipment_list
+
+
+def get_equipment_schedule(equipment_id: str, start_date: date = None, end_date: date = None) -> List[RentalRecord]:
+    from datetime import timedelta
+    if start_date is None:
+        start_date = date.today()
+    if end_date is None:
+        end_date = start_date + timedelta(days=30)
+
+    rentals = get_rentals_by_equipment(equipment_id)
+    schedule = []
+
+    for r in rentals:
+        r_start = r.rental_date
+        r_end = r.actual_return_date or r.expected_return_date
+
+        if r_end >= start_date and r_start <= end_date:
+            schedule.append(r)
+
+    schedule.sort(key=lambda x: x.rental_date)
+    return schedule
+
+
+def check_rental_conflict(
+    equipment_id: str,
+    rental_date: date,
+    expected_return_date: date,
+    exclude_rental_id: str = None,
+) -> List[RentalRecord]:
+    rentals = get_rentals_by_equipment(equipment_id)
+    conflicts = []
+
+    for r in rentals:
+        if exclude_rental_id and r.id == exclude_rental_id:
+            continue
+
+        if r.status == "已完成" and r.actual_return_date:
+            r_end = r.actual_return_date
+        else:
+            r_end = r.expected_return_date
+
+        if rental_date <= r_end and expected_return_date >= r.rental_date:
+            conflicts.append(r)
+
+    return conflicts
+
+
+def get_equipment_status_on_date(equipment_id: str, target_date: date) -> str:
+    rentals = get_rentals_by_equipment(equipment_id)
+
+    for r in rentals:
+        r_start = r.rental_date
+        if r.status == "已完成" and r.actual_return_date:
+            r_end = r.actual_return_date
+        else:
+            r_end = r.expected_return_date
+
+        if r_start <= target_date <= r_end:
+            if r.status == "已完成":
+                return "已归还"
+            else:
+                return "在租"
+
+    return "空闲"
+
+
+def get_rentals_on_date(target_date: date) -> dict:
+    rentals = load_rentals()
+
+    rented_equipment = []
+    new_rentals = []
+    returns = []
+    overdue = []
+
+    for r in rentals:
+        r_start = r.rental_date
+
+        if r.status == "已完成" and r.actual_return_date:
+            r_end = r.actual_return_date
+            is_active_on_date = r_start <= target_date <= r_end
+            is_return_on_date = r_end == target_date
+        else:
+            r_end = r.expected_return_date
+            is_active_on_date = r_start <= target_date
+            is_return_on_date = False
+
+        if is_active_on_date and r.status == "进行中":
+            rented_equipment.append(r)
+
+            if target_date > r.expected_return_date:
+                overdue.append(r)
+
+        if r.rental_date == target_date:
+            new_rentals.append(r)
+
+        if is_return_on_date and r.status == "已完成":
+            returns.append(r)
+
+    return {
+        "target_date": target_date,
+        "rented_equipment": rented_equipment,
+        "new_rentals": new_rentals,
+        "returns": returns,
+        "overdue": overdue,
+    }
