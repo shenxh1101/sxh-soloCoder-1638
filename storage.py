@@ -9,6 +9,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 EQUIPMENT_FILE = os.path.join(DATA_DIR, "equipment.json")
 RENTALS_FILE = os.path.join(DATA_DIR, "rentals.json")
 MAINTENANCE_FILE = os.path.join(DATA_DIR, "maintenance.json")
+COUNTER_FILE = os.path.join(DATA_DIR, "counters.json")
 
 
 def _date_to_str(d: date) -> str:
@@ -182,3 +183,48 @@ def update_equipment(equipment: Equipment):
             equipment_list[i] = equipment
             break
     save_equipment(equipment_list)
+
+
+def _load_counters() -> dict:
+    if not os.path.exists(COUNTER_FILE):
+        return {}
+    with open(COUNTER_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_counters(counters: dict):
+    _ensure_data_dir()
+    with open(COUNTER_FILE, "w", encoding="utf-8") as f:
+        json.dump(counters, f, ensure_ascii=False, indent=2)
+
+
+def get_next_equipment_number(eq_type: str) -> int:
+    counters = _load_counters()
+    type_prefix = eq_type[0]
+    key = f"equipment_{type_prefix}"
+
+    if key not in counters:
+        equipment_list = load_equipment()
+        max_num = 0
+        for eq in equipment_list:
+            if eq.type == eq_type:
+                try:
+                    num = int(eq.id[1:])
+                    max_num = max(max_num, num)
+                except (ValueError, IndexError):
+                    pass
+        counters[key] = max_num
+
+    counters[key] += 1
+    _save_counters(counters)
+    return counters[key]
+
+
+def reset_equipment_counter(eq_type: str):
+    counters = _load_counters()
+    type_prefix = eq_type[0]
+    key = f"equipment_{type_prefix}"
+    if key in counters:
+        del counters[key]
+        _save_counters(counters)
+

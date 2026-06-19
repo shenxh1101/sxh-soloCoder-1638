@@ -10,6 +10,7 @@ from storage import (
     generate_id,
     get_equipment_by_id,
     update_equipment,
+    get_next_equipment_number,
 )
 
 
